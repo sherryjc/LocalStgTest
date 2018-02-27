@@ -5,6 +5,7 @@
 #include "stdafx.h"
 #include <WTypes.h>
 #include <iostream>
+#include <sstream>
 #include <atltime.h>
 #include <memory>
 
@@ -104,7 +105,8 @@ namespace LocStg {
 	void _WriteStorageType(DWORD type);
 
 	constexpr wchar_t* sLocalDocs = L"LocalDocs";
-
+	constexpr int nPartStorages = 15;
+	constexpr int nPartStreamSize = 15000;
 }
 
 
@@ -226,8 +228,6 @@ void LocStg::Generate(const std::wstring& fileToWrite, int nParts)
 	//            Each of the nPartStorages has a stream of size nPartStreamSize.
 	// So the total number of storages = nParts * nPartStorages + 2 (for root, "LocalDocs)
 	// Total stream bytes = nParts * nPartStorages * nPartStreamSize
-	constexpr int nPartStorages = 15;
-	constexpr int nPartStreamSize = 15000;
 
 	// Create the root storage
 	IStorage* pRoot = nullptr;
@@ -256,9 +256,54 @@ void LocStg::Generate(const std::wstring& fileToWrite, int nParts)
 
 }
 
-HRESULT LocStg::GeneratePart(IStorage* pStorage)
+HRESULT LocStg::CreatePartStorage(IStorage* pStorage, const std::wstring& partName)
 {
+	DWORD grfMode = STGM_WRITE | STGM_SHARE_EXCLUSIVE | STGM_CREATE | STGM_DIRECT;
+	IStorage* pPartStg = nullptr;
+	HRESULT hr = pStorage->CreateStorage(stgName.c_str(), grfMode, 0, 0, &pPartStg);
+	if (!SUCCEEDED(hr) || !pPartStg)
+	{
+		std::wcout << L"Could not create storage \"" << partName.c_str() << "\" for writing" << std::endl;
+		return;
+	}
+	StorageWrapper w;
+	w.Set(pPartStg);
 
+	// Generate the part's sub-storages
+	constexpr wchar_t* partPrefix = L"PStg_";
+	for (int ii = 0; ii < LocStg::nPartStorages; ++ii)
+	{
+		std::ostringstream convHelper;
+		convHelper << ii;
+		std::wstring stgName = partPrefix + convHelper;
+		hr = LocStg::CreatePartSubStorage(pPartStg, stgName);
+	}
+
+}
+
+HRESULT LocStg::CreatePartSubStorage(IStorage* pStorage, const std::wstring& stgName)
+{
+	DWORD grfMode = STGM_WRITE | STGM_SHARE_EXCLUSIVE | STGM_CREATE | STGM_DIRECT;
+	IStorage* pSubStg = nullptr;
+	HRESULT hr = pStorage->CreateStorage(stgName.c_str(), grfMode, 0, 0, &pSubStg);
+	if (!SUCCEEDED(hr) || !pSubStg)
+	{
+		std::wcout << L"Could not create storage \"" << stgName.c_str() << "\" for writing" << std::endl;
+		return hr;
+	}
+	StorageWrapper w;
+	w.Set(pSubStg);
+
+	std::wstring streamName = stgName + L"_Stream";
+	// Create the stream inside the sub-storage
+	IStream* pStream = nullptr;
+	hr = pSubStg->CreateStream(stgName.c_str(), grfMode, 0, 0, &pStream);
+	if (!SUCCEEDED(hr) || !pStream)
+	{
+		std::wcout << L"Could not create stream \"" << streamName.c_str() << "\" for writing" << std::endl;
+		return hr;
+	}
+	StreamWrapper sw;
 }
 
 // Traverse starting at pStorage, collecting storage and stream counts
