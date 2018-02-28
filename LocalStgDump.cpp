@@ -29,61 +29,37 @@ TraverseInfo::TraverseInfo()
 	m_cbTotalStreamSize.LowPart = 0;
 }
 
-class EnumWrapper
+template<class T> class ObjWrapper
 {
 public:
-	EnumWrapper();
-	~EnumWrapper();
-	void Set(IEnumSTATSTG* pEnum);
+	ObjWrapper();
+	~ObjWrapper();
+	void Set(T* pObj);
 private:
-	IEnumSTATSTG* m_pEnum;
+	T* m_pObj;
 };
 
-EnumWrapper::EnumWrapper()
-	: m_pEnum(nullptr)
+template<class T>
+ObjWrapper<T>::ObjWrapper()
+	: m_pObj(nullptr)
 {}
 
-EnumWrapper::~EnumWrapper()
+template<class T>
+ObjWrapper<T>::~ObjWrapper()
 {
-	if (m_pEnum)
+	if (m_pObj)
 	{
-		m_pEnum->Release();
-		m_pEnum = nullptr;
+		m_pObj->Release();
+		m_pObj = nullptr;
 	}
 }
 
-void EnumWrapper::Set(IEnumSTATSTG* pEnum)
+template<class T>
+void ObjWrapper<T>::Set(T* pObj)
 {
-	m_pEnum = pEnum;
+	m_pObj = pObj;
 }
 
-class StorageWrapper
-{
-public:
-	StorageWrapper();
-	~StorageWrapper();
-	void Set(IStorage* pStorage);
-private:
-	IStorage* m_pStorage;
-};
-
-StorageWrapper::StorageWrapper()
-	: m_pStorage(nullptr)
-{}
-
-StorageWrapper::~StorageWrapper()
-{
-	if (m_pStorage)
-	{
-		m_pStorage->Release();
-		m_pStorage = nullptr;
-	}
-}
-
-void StorageWrapper::Set(IStorage* pStorage)
-{
-	m_pStorage = pStorage;
-}
 
 namespace LocStg {
 
@@ -98,6 +74,8 @@ namespace LocStg {
 	HRESULT FindLocalDocsStorage(IStorage *pParent, IStorage **o_ppLocalDocsStg);
 	HRESULT ListImmediateChildren(IStorage *pParent, int nChildren, int indentLevel);
 	HRESULT CreateRootStorage(const std::wstring& strName, bool bOverwrite, IStorage** o_ppStorage);
+	HRESULT CreatePartStorage(IStorage* pStorage, const std::wstring& partName);
+	HRESULT CreatePartSubStorage(IStorage* pStorage, const std::wstring& stgName);
 
 	void _Usage(const wchar_t* thisProg);
 	void _WaitForKey();
@@ -106,7 +84,8 @@ namespace LocStg {
 
 	constexpr wchar_t* sLocalDocs = L"LocalDocs";
 	constexpr int nPartStorages = 15;
-	constexpr int nPartStreamSize = 15000;
+	constexpr int nPartWriteBlocks = 30;
+	constexpr int nPartWriteBlockSize = 512;
 }
 
 
@@ -139,7 +118,7 @@ int wmain(int argc, wchar_t* argv[])
 	{
 		case 1: LocStg::ListTopLevel(fileName); break;
 		case 2: LocStg::DisplayTotalStorageCount(fileName); break;
-		case 3: LocStg::Generate(fileName, partCount);
+		case 3: LocStg::Generate(fileName, partCount); break;
 		default: LocStg::_Usage(argv[0]);  break;
 	}
 }
@@ -157,7 +136,7 @@ void LocStg::ListTopLevel(const std::wstring& fileToLoad)
 		std::wcout << L"Open root storage FAILED with error code " << hr << std::endl;
 		return;
 	}
-	StorageWrapper w;
+	ObjWrapper<IStorage> w;
 	w.Set(pRoot);
 
 	std::wcout << L"Open root storage SUCCEEDED" << std::endl;
@@ -180,7 +159,7 @@ void LocStg::ListTopLevel(const std::wstring& fileToLoad)
 	hr = LocStg::ListImmediateChildren(pRoot, rootElemCnt, indentLevel+1);
 
 	// Pause before releasing storage to allow examination in ProcessExplorer etc.
-	_WaitForKey();
+	//_WaitForKey();
 }
 
 void LocStg::DisplayTotalStorageCount(const std::wstring& fileToLoad)
@@ -225,9 +204,9 @@ void LocStg::Generate(const std::wstring& fileToWrite, int nParts)
 	//         ld<n>    'nParts' storages numbered ld0 ... ln<nParts-1>
 	//         Each ld<n> storage corresponds to a "part"
 	//            A part consists of nPartStorages
-	//            Each of the nPartStorages has a stream of size nPartStreamSize.
+	//            Each of the nPartStorages has a stream of size nPartWriteBlocks * nPartWriteBlockSize
 	// So the total number of storages = nParts * nPartStorages + 2 (for root, "LocalDocs)
-	// Total stream bytes = nParts * nPartStorages * nPartStreamSize
+	// Total stream bytes = nParts * nPartStorages * nPartWriteBlocks * nPartWriteBlockSize
 
 	// Create the root storage
 	IStorage* pRoot = nullptr;
@@ -237,7 +216,7 @@ void LocStg::Generate(const std::wstring& fileToWrite, int nParts)
 		std::wcout << L"Could not create root storage \"" << fileToWrite.c_str() << "\" for writing" << std::endl;
 		return;
 	}
-	StorageWrapper w;
+	ObjWrapper<IStorage> w;
 	w.Set(pRoot);
 
 	// Create "LocalDocs" storage below the root
@@ -249,36 +228,66 @@ void LocStg::Generate(const std::wstring& fileToWrite, int nParts)
 		std::wcout << L"Could not create storage \"" << LocStg::sLocalDocs << "\" for writing" << std::endl;
 		return;
 	}
-	StorageWrapper w2;
+	ObjWrapper<IStorage> w2;
 	w2.Set(pLocalDocsStg);
 
-	// Create 'nParts' parts below that
+	constexpr wchar_t* partPrefix = L"PART_";
 
+	// Create 'nParts' parts below that
+	for (int ii = 0; ii < nParts; ++ii)
+	{
+		std::wostringstream convHelper;
+		convHelper << partPrefix << ii;
+		std::wstring partName = convHelper.str();
+
+		LocStg::CreatePartStorage(pLocalDocsStg, partName);
+	}
 }
 
 HRESULT LocStg::CreatePartStorage(IStorage* pStorage, const std::wstring& partName)
 {
 	DWORD grfMode = STGM_WRITE | STGM_SHARE_EXCLUSIVE | STGM_CREATE | STGM_DIRECT;
 	IStorage* pPartStg = nullptr;
-	HRESULT hr = pStorage->CreateStorage(stgName.c_str(), grfMode, 0, 0, &pPartStg);
+	HRESULT hr = pStorage->CreateStorage(partName.c_str(), grfMode, 0, 0, &pPartStg);
 	if (!SUCCEEDED(hr) || !pPartStg)
 	{
 		std::wcout << L"Could not create storage \"" << partName.c_str() << "\" for writing" << std::endl;
-		return;
+		return hr;
 	}
-	StorageWrapper w;
+	ObjWrapper<IStorage> w;
 	w.Set(pPartStg);
 
 	// Generate the part's sub-storages
 	constexpr wchar_t* partPrefix = L"PStg_";
 	for (int ii = 0; ii < LocStg::nPartStorages; ++ii)
 	{
-		std::ostringstream convHelper;
-		convHelper << ii;
-		std::wstring stgName = partPrefix + convHelper;
+		std::wostringstream convHelper;
+		convHelper << partPrefix << ii;
+		std::wstring stgName = convHelper.str();
 		hr = LocStg::CreatePartSubStorage(pPartStg, stgName);
+		if (!SUCCEEDED(hr)) break;
 	}
+	return hr;
+}
 
+static unsigned char* _PartData(size_t cb)
+{
+	static size_t currentSize = 0;
+	static unsigned char* pData = nullptr;
+
+	if (cb > currentSize)
+	{
+		if (pData) delete pData;
+		pData = new unsigned char[cb];
+		currentSize = cb;
+		unsigned char* pStart = pData;
+
+		for (size_t ii = 0; ii < currentSize; ++ii)
+		{
+			*pStart++ = ii % 256;
+		}
+	}
+	return pData;
 }
 
 HRESULT LocStg::CreatePartSubStorage(IStorage* pStorage, const std::wstring& stgName)
@@ -291,20 +300,32 @@ HRESULT LocStg::CreatePartSubStorage(IStorage* pStorage, const std::wstring& stg
 		std::wcout << L"Could not create storage \"" << stgName.c_str() << "\" for writing" << std::endl;
 		return hr;
 	}
-	StorageWrapper w;
+	ObjWrapper<IStorage> w;
 	w.Set(pSubStg);
 
 	std::wstring streamName = stgName + L"_Stream";
 	// Create the stream inside the sub-storage
 	IStream* pStream = nullptr;
-	hr = pSubStg->CreateStream(stgName.c_str(), grfMode, 0, 0, &pStream);
+	hr = pSubStg->CreateStream(streamName.c_str(), grfMode, 0, 0, &pStream);
 	if (!SUCCEEDED(hr) || !pStream)
 	{
 		std::wcout << L"Could not create stream \"" << streamName.c_str() << "\" for writing" << std::endl;
 		return hr;
 	}
-	StreamWrapper sw;
+	ObjWrapper<IStream> sw;
+	sw.Set(pStream);
+
+	void const *pv = _PartData(LocStg::nPartWriteBlockSize);
+
+	for (int ii = 0; ii < LocStg::nPartWriteBlocks; ++ii)
+	{
+		ULONG cbWritten = 0;
+		hr = pStream->Write(pv, LocStg::nPartWriteBlockSize, &cbWritten);
+		if (!SUCCEEDED(hr) || cbWritten < LocStg::nPartWriteBlockSize) break;
+	}
+	return hr;
 }
+
 
 // Traverse starting at pStorage, collecting storage and stream counts
 void LocStg::Traverse(IStorage* pStorage, TraverseInfo& ti)
@@ -320,7 +341,7 @@ void LocStg::Traverse(IStorage* pStorage, TraverseInfo& ti)
 		ti.m_hResult = hr;
 		return;
 	}
-	EnumWrapper w;
+	ObjWrapper<IEnumSTATSTG> w;
 	w.Set(pEnum);
 
 	constexpr ULONG BlockSize = 100;
@@ -431,7 +452,7 @@ HRESULT LocStg::GetStorageElementCount(IStorage* pStorage, int& elemCnt)
 		std::wcout << L"Could not get a storage enumerator, error code = " << hr << std::endl;
 		return hr;
 	}
-	EnumWrapper w;
+	ObjWrapper<IEnumSTATSTG> w;
 	w.Set(pEnum);
 
 	constexpr ULONG BlockSize = 100;
@@ -464,7 +485,7 @@ HRESULT LocStg::FindLocalDocsStorage(IStorage *pParent, IStorage **o_ppLocalDocs
 		std::wcout << L"Could not get a storage enumerator, error code = " << hr << std::endl;
 		return hr;
 	}
-	EnumWrapper w;
+	ObjWrapper<IEnumSTATSTG> w;
 	w.Set(pEnum);
 
 	// Assumption: LocalDocs is in the first BlockSize of whatever storage we're searching!
@@ -561,7 +582,6 @@ HRESULT LocStg::ListImmediateChildren(IStorage *pParent, int nChildren, int inde
 	pEnum->Release();
 	return hr;
 }
-
 
 void LocStg::_Usage(const wchar_t* thisProg)
 {
